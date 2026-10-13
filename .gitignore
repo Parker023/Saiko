@@ -20,3 +20,7 @@ dist/
 
 # Local env files
 .env
+
+# Fetched API payloads
+lake/
+charts/
