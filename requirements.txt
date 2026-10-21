@@ -6,3 +6,5 @@ matplotlib
 fastapi
 uvicorn
 pydantic
+streamlit
+httpx

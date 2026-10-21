@@ -24,14 +24,25 @@ python -m jobagency.main --pages 3      # more pages
 python -m jobagency.main --offline      # reuse the newest saved payloads
 ```
 
-**Run the API:**
+**Run the API** (terminal 1):
 
 ```bash
-uvicorn jobagency.api:app --reload
+uvicorn jobagency.api:app --reload          # port 8000
 ```
 
-Then open <http://localhost:8000/docs> for interactive documentation, or
-<http://localhost:8000/chart/tags> for a chart.
+<http://localhost:8000/docs> gives interactive documentation;
+<http://localhost:8000/chart/tags> gives a chart.
+
+**Run the UI** (terminal 2, with the API already running):
+
+```bash
+PYTHONPATH=. streamlit run jobagency/ui.py  # port 8501
+```
+
+> `PYTHONPATH=.` is needed because `streamlit run jobagency/ui.py` puts
+> `jobagency/` on `sys.path`, not the project root — so `from jobagency import
+> ui_client` cannot resolve. The proper fix is a `pyproject.toml` and
+> `pip install -e .`, which would also settle pytest's rootdir.
 
 **Run the tests:**
 
@@ -56,6 +67,12 @@ analyse.py    pandas / numpy. DataFrame in, plain JSON-ready Python out.
 main.py       Wires the pipeline; also the CLI.
     |
 api.py        HTTP interface. Loads data once at startup, serves it.
+    |
+    |  ~~~~~~ process boundary: everything below speaks only HTTP ~~~~~~
+    |
+ui_client.py  One function per endpoint. The UI's only link to the backend.
+    |
+ui.py         Streamlit. Imports ui_client and nothing else from the package.
 ```
 
 ### The rules that shape it
@@ -77,6 +94,11 @@ loaded, so no endpoint can receive `None`.
 
 **Anything a caller names is an allowlist** — `COUNTABLE` columns in
 `count_by`, `CHARTS` names in `/chart/{name}`. Never `getattr` on user input.
+
+**The UI is an HTTP client, not an import.** `ui.py` may import `ui_client`
+and nothing else from this package. If it imported `analyse` directly the API
+would be decorative — so `tests/test_ui_boundary.py` enforces it by parsing
+the imports.
 
 ---
 
@@ -110,6 +132,37 @@ Filters combine with AND. Results are sorted newest first, then sliced — so
 pagination is stable. `total` is the count after filtering, before slicing.
 
 ---
+
+## The UI
+
+A Streamlit app on port 8501 that talks to the API on 8000 over HTTP. Two
+processes, one repo.
+
+- **Sidebar** — backend health, data source, freshness, a refresh button, and
+  the filters.
+- **Table** — a page of summaries. Click a row to fetch that job's full
+  description from `/jobs/{id}`; the list itself never carries descriptions.
+- **Insights** — the three charts as PNGs straight from `/chart/{name}`, plus
+  headline numbers from `/stats`.
+
+Three details worth knowing:
+
+**Streamlit re-runs the entire script on every interaction.** There are no
+event handlers — the script *is* the handler. That is why every API call goes
+through `@st.cache_data`, and why the page number lives in `st.session_state`
+rather than an ordinary variable.
+
+**The three-state filters are why the API uses `bool | None`.** "Any / Remote
+/ On-site" cannot be expressed by a checkbox, and an unset widget sends no
+parameter at all rather than an empty one.
+
+**Charts arrive as bytes.** `st.image` takes them directly, so nothing is
+written to disk — which is what `chart.png_bytes` exists for, alongside
+`save_png` for the CLI.
+
+> The job detail panel renders the board's own HTML with
+> `unsafe_allow_html=True`. Acceptable for a local single-user tool; it would
+> need sanitising before this was exposed to anyone else.
 
 ## The data, and what is wrong with it
 
@@ -152,8 +205,16 @@ the top "skills" are its business categories rather than developer skills.
 
 ## Testing
 
-77 fast tests, offline and deterministic, plus one integration test that is
+143 fast tests, offline and deterministic, plus one integration test that is
 deselected by default.
+
+| File | Covers |
+|---|---|
+| `test_normalise.py` | salary parsing, the common record shape, dedup |
+| `test_analyse.py` | every statistic, the honesty contract, JSON-serialisability |
+| `test_fetch.py` | paging, retries, the disk cache — all with the network mocked |
+| `test_api.py` | every endpoint, validation, pagination, 404s and 503s |
+| `test_ui_boundary.py` | the UI does not import the backend |
 
 - **Pure functions** (`normalise`, `analyse`) are tested directly against
   hand-built fixtures with known answers.
@@ -161,11 +222,17 @@ deselected by default.
   caps and error propagation are covered without a network.
 - **Retry logic** is tested by replacing `requests.get`, with `time.sleep`
   patched out so the tests do not wait for backoff.
+- **The API** is tested with `TestClient` and `dependency_overrides`, against
+  a six-row frame with known answers.
+- **`lifespan` is stubbed separately.** `dependency_overrides` replaces what
+  *handlers* receive; it does not stop startup. Without stubbing the loader
+  too, every test did a live fetch — measured at 120s for the file, 1.7s
+  after.
 - The **one integration test** exists because both APIs silently ignore
   documented parameters; it is how you find out they changed something.
 
 ```bash
-pytest -q                               # 77 tests, ~0.5s
+pytest -q                               # 143 tests, ~1.8s
 pytest -m integration -o addopts=""     # 1 test, hits remotive.com
 ```
 
@@ -176,15 +243,16 @@ pytest -m integration -o addopts=""     # 1 test, hits remotive.com
 | Phase | | State |
 |---|---|---|
 | 1 | Fetch, normalise, analyse, chart | ✅ done |
-| 2 | FastAPI | ✅ endpoints done, tests pending |
-| 3 | Streamlit UI (an HTTP client, not an import) | todo |
+| 2 | FastAPI | ✅ done |
+| 3 | Streamlit UI (an HTTP client, not an import) | ✅ done |
 | 4 | RAG over the resume and job descriptions | todo |
 | 5 | Tool calling — the agent routes numbers vs text | todo |
 | 6 | `/ask` endpoint and a chat UI | todo |
 
 ### Known gaps
 
-- No `test_api.py` yet.
+- No `pyproject.toml`, so `PYTHONPATH=.` is needed to run the UI and
+  `pytest.ini` has to be force-added past the `*.ini` ignore rule.
 - No maximum staleness: the cache is accepted at any age, so a month-old
   cache would be served as if current.
 - `q` searches titles only. Most skill mentions are in the descriptions,
