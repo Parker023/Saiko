@@ -13,6 +13,7 @@ phase 2 imports them: FastAPI will call `load_jobs()` once at startup and
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -30,6 +31,8 @@ from jobagency.normalise import normalise_all
 
 CHART_DIR = Path(__file__).parent.parent / "charts"
 
+logger = logging.getLogger(__name__)
+
 
 def _newest(directory: Path, prefix: str) -> Path:
     """The most recent saved payload for one source.
@@ -46,16 +49,18 @@ def _newest(directory: Path, prefix: str) -> Path:
 
 
 def load_jobs(
-    *, offline: bool = False, pages: int = 1,
-    save: bool = True, lake: Path = LAKE_DIR,
+        *, offline: bool = False, pages: int = 1,
+        save: bool = True, lake: Path = LAKE_DIR,
 ) -> pd.DataFrame:
     """Get job postings as a typed DataFrame, from the network or from disk.
 
-    `offline` reads the newest saved payloads instead of fetching. Explicit
-    rather than an automatic fallback: silently serving yesterday's data
-    when a fetch fails is how you end up debugging the wrong thing.
+    `offline` reads the newest saved payloads instead of fetching. Raises
+    on failure rather than returning None - callers that want a fallback
+    use `load_jobs_with_fallback`, which catches and reports which source
+    it ended up using.
     """
     if offline:
+        # note: `save` is irrelevant here - nothing is fetched
         remotive = load_raw(_newest(lake, "remotive"))
         arbeitnow = load_raw(_newest(lake, "arbeitnow"))
     else:
@@ -65,6 +70,54 @@ def load_jobs(
             save_raw(arbeitnow, "arbeitnow", lake)
 
     return to_dataframe(normalise_all(remotive, arbeitnow))
+
+
+def load_jobs_with_fallback(
+        *, pages: int = 1, save: bool = True, lake: Path = LAKE_DIR,
+) -> dict:
+    """Try live, fall back to the cache, give up only if both fail.
+
+    `load_jobs` signals failure by RAISING, not by returning None - so each
+    attempt needs its own except. FetchError covers the network; the offline
+    path raises FileNotFoundError, which is an OSError and would NOT be
+    caught by `except RuntimeError`.
+
+    Returns one DataFrame plus its provenance:
+        data   - the frame, or None if nothing could be loaded
+        source - "live", "cache", or None
+        error  - what went wrong on the way, if anything
+
+    `source is None` is the single marker for "no data": one field that
+    cannot disagree with itself, rather than a separate availability flag.
+    """
+    error: Exception | None = None
+
+    try:
+        return {
+            "data": load_jobs(offline=False, pages=pages, save=save, lake=lake),
+            "source": "live",
+            "loaded_at": pd.Timestamp.now(tz="UTC"),
+            "error": None,
+        }
+    except (FetchError, FileNotFoundError) as live_error:
+        error = live_error
+        logger.warning("live fetch failed, falling back to cache: %s", live_error)
+
+    try:
+        return {
+            "data": load_jobs(offline=True, lake=lake),
+            "source": "cache",
+            "loaded_at": pd.Timestamp.now(tz="UTC"),
+            "error": error,          # why we are degraded
+        }
+    except (FetchError, FileNotFoundError) as cache_error:
+        logger.error("cache unusable too: %s", cache_error)
+        return {
+            "data": None,
+            "source": None,
+            "loaded_at": pd.Timestamp.now(tz="UTC"),
+            "error": cache_error,
+        }
 
 
 def build_report(df: pd.DataFrame) -> dict:

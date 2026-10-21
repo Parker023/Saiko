@@ -3,3 +3,5 @@ numpy
 pytest
 requests
 matplotlib
+fastapi
+uvicorn
