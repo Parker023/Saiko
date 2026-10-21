@@ -7,10 +7,12 @@ data they like via `dependency_overrides`.
 
 import logging
 from contextlib import asynccontextmanager
+from typing import Callable
 
 import pandas as pd
 from fastapi import Depends, FastAPI, Request, Response, status, HTTPException, Query
-
+from jobagency.chart import trend_figure, tags_figure, salary_coverage_figure, png_bytes
+from jobagency.analyse import posting_trend, salary_stats, top_tags
 from jobagency.main import load_jobs_with_fallback, build_report
 from jobagency.models import (
     JobDetail,
@@ -20,6 +22,12 @@ from jobagency.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+CHARTS: dict[str, tuple[Callable, Callable]] = {
+    "trend": (posting_trend, trend_figure),
+    "tags": (top_tags, tags_figure),
+    "salary_coverage": (salary_stats, salary_coverage_figure),
+}
 
 
 @asynccontextmanager
@@ -206,3 +214,19 @@ def job(job_id: str, df: pd.DataFrame = Depends(get_dataframe)):
             status.HTTP_404_NOT_FOUND, detail=f"no job with id {job_id!r}"
         )
     return JobDetail.model_validate(_records(matches.head(1))[0])
+
+
+@app.get("/chart/{name}", response_class=Response, responses={
+    200: {"content": {"image/png": {}}},
+
+})
+def chart(name: str, df: pd.DataFrame = Depends(get_dataframe)):
+    """A chart, as a PNG."""
+
+    if name not in CHARTS:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            detail=f"no such chart {name!r} allowed: {', '.join(CHARTS.keys())}", )
+    analyse_fn, figure_fn = CHARTS[name]
+
+    fig = figure_fn(analyse_fn(df))
+    return Response(content=png_bytes(fig), media_type="image/png")
