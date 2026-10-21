@@ -9,9 +9,10 @@ import logging
 from contextlib import asynccontextmanager
 
 import pandas as pd
-from fastapi import Depends, FastAPI, Request, Response, status
+from fastapi import Depends, FastAPI, Request, Response, status, HTTPException
 
-from jobagency.main import load_jobs_with_fallback
+from jobagency.main import load_jobs_with_fallback, build_report
+from jobagency.models import JobStatsResponse
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,12 @@ def get_loaded_data(request: Request) -> dict:
     `app.dependency_overrides[get_loaded_data] = lambda: {...}`.
     """
     return request.app.state.jobs
+
+
+def get_dataframe(loaded: dict = Depends(get_loaded_data)) -> pd.DataFrame:
+    if loaded["data"] is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="no data loaded")
+    return loaded["data"]
 
 
 def _summary(loaded: dict) -> dict:
@@ -88,3 +95,8 @@ def refresh(response: Response) -> dict:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "unavailable", "reason": str(app.state.jobs["error"])}
     return _summary(app.state.jobs)
+
+
+@app.get("/stats", response_model=JobStatsResponse)
+def stats(df: pd.DataFrame = Depends(get_dataframe)) :
+    return build_report(df)

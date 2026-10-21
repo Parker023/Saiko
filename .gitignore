@@ -24,3 +24,6 @@ dist/
 # Fetched API payloads
 lake/
 charts/
+
+# INI config files
+*.ini
