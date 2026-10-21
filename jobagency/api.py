@@ -9,10 +9,10 @@ import logging
 from contextlib import asynccontextmanager
 
 import pandas as pd
-from fastapi import Depends, FastAPI, Request, Response, status, HTTPException
+from fastapi import Depends, FastAPI, Request, Response, status, HTTPException, Query
 
 from jobagency.main import load_jobs_with_fallback, build_report
-from jobagency.models import JobStatsResponse
+from jobagency.models import JobStatsResponse, JobSummary, JobDetail
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ def get_loaded_data(request: Request) -> dict:
 
 
 def get_dataframe(loaded: dict = Depends(get_loaded_data)) -> pd.DataFrame:
+    """The loaded frame."""
     if loaded["data"] is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="no data loaded")
     return loaded["data"]
@@ -98,5 +99,61 @@ def refresh(response: Response) -> dict:
 
 
 @app.get("/stats", response_model=JobStatsResponse)
-def stats(df: pd.DataFrame = Depends(get_dataframe)) :
+def stats(df: pd.DataFrame = Depends(get_dataframe)):
     return build_report(df)
+
+
+@app.get("/jobs")
+def jobs(*,
+         source: str | None = None,
+         company: str | None = Query(default=None, max_length=100),
+         category: str | None = Query(default=None, max_length=100),
+         job_type: str | None = Query(default=None, max_length=50),
+         tag: str | None = Query(default=None, max_length=50),
+         q: str | None = Query(default=None, max_length=100, min_length=2),
+         remote: bool | None = Query(default=None),
+         has_salary: bool | None = Query(default=None),
+         limit: int = Query(default=20, ge=1, le=100), offset: int = Query(default=0, ge=0),
+         df: pd.DataFrame = Depends(get_dataframe)):
+    """Search for jobs."""
+    df_new = df.copy()
+
+    # starts filtering
+    df_new = df_new[df_new["source"] == source.lower()] if source else df_new
+    df_new = df_new[df_new["company"].str.contains(company, case=False, na=False)] if company else df_new
+    df_new = df_new[df_new["category"] == category.lower()] if category else df_new
+    df_new = df_new[df_new["job_type"] == job_type.lower()] if job_type else df_new
+    df_new = df_new[df_new["tags"].str.contains(tag, case=False, na=False)] if tag else df_new
+    df_new = df_new[df_new["title"].str.contains(q, case=False, na=False)] if q else df_new
+    df_new = df_new[df_new["remote"] == remote] if remote is not None else df_new
+    df_new = df_new[df_new["salary_low"].notna()] if has_salary is not None else df_new
+    df_new = df.dropna(subset=["salary_low"]) if has_salary is None else df_new
+    df_new = df.dropna(subset=["salary_high"]) if has_salary is None else df_new
+
+    total_jobs = len(df_new)
+    df_new = df_new.iloc[offset:offset + limit]
+
+    # ends filtering
+
+    items = [JobSummary.model_validate(row) for row in df_new.to_dict(orient="records")]
+
+    return {
+        "total": total_jobs,
+        "limit": limit,
+        "offset": offset,
+        "items": items
+    }
+
+
+@app.get("/jobs/{job_id}")
+def job(job_id: str, resp: Response, df: pd.DataFrame = Depends(get_dataframe)):
+    """Get a single job by its ID."""
+    matching_rows = df.loc[df["job_id"] == job_id]
+
+    if not matching_rows.empty:
+        row = matching_rows.iloc[0]
+        resp.status_code = status.HTTP_200_OK
+        return JobDetail.model_validate(row.to_dict())
+    else:
+        resp.status_code = status.HTTP_404_NOT_FOUND
+        return {"error": f"no job with ID {job_id}"}

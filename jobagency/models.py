@@ -1,5 +1,5 @@
-from datetime import date
-from pydantic import BaseModel
+from datetime import date, datetime
+from pydantic import BaseModel, Field
 
 
 class Overview(BaseModel):
@@ -53,3 +53,24 @@ class JobStatsResponse(BaseModel):
     top_tags: list[TagCount]
     trend: list[TrendItem]
     tag_pairs: list[TagPair]
+
+
+class JobSummary(BaseModel):
+    job_id: str
+    title: str
+    company: str
+    source: str
+    category: str | None
+    job_type: str | None
+    location: str | None
+    remote: bool
+    tags: list[str]
+    posted_at: datetime
+    salary_low: float | None
+    salary_high: float | None
+    salary_period: str | None
+    url: str
+
+class JobDetail(JobSummary):
+    description_html: str
+
