@@ -1,0 +1,22 @@
+# Optional: archive fetched payloads to a miniS3 bucket.
+#
+#   pip install -r requirements-minis3.txt
+#
+# Without it the pipeline still works - payloads stay in the local lake and are
+# never pruned, because nothing can confirm a second copy exists. jobagency's
+# storage module catches the ImportError, so this is genuinely optional.
+#
+# Also needed at runtime:
+#   MINIS3_ENDPOINT   base URL including /storage/minis3
+#   MINIS3_API_KEY    ms3_...  (READ + WRITE on the bucket)
+#   a Tailscale connection to the server
+#   the bucket must already exist - the client does not create buckets
+
+# Pinned to a tag, not a branch: @main would change this build whenever the
+# client is pushed to, breaking things for reasons unrelated to this repo.
+#
+# The Python client has its own tag series (py-vX.Y.Z) because the repo also
+# ships a Java client and a Spring Boot starter on their own cadence - the
+# plain v0.1.0 tag predates the Python client entirely and installing from it
+# fails with "neither 'setup.py' nor 'pyproject.toml' found".
+minis3 @ git+https://github.com/Parker023/miniS3.git@py-v0.1.0#subdirectory=minis3-client-python

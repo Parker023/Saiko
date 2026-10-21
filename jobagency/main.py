@@ -26,7 +26,8 @@ from jobagency.analyse import (
 from jobagency.chart import (
     salary_coverage_figure, save_png, tags_figure, trend_figure,
 )
-from jobagency.fetch import LAKE_DIR, FetchError, fetch_all, load_raw, save_raw
+from jobagency.fetch import FetchError, fetch_all, load_raw
+from jobagency.storage import LAKE_DIR, archive
 from jobagency.normalise import normalise_all
 
 CHART_DIR = Path(__file__).parent.parent / "charts"
@@ -66,8 +67,10 @@ def load_jobs(
     else:
         remotive, arbeitnow = fetch_all(max_pages=pages)
         if save:
-            save_raw(remotive, "remotive", lake)
-            save_raw(arbeitnow, "arbeitnow", lake)
+            # archive = write locally, push to miniS3, then delete anything
+            # older than the retention window that miniS3 already holds.
+            archive(remotive, "remotive", directory=lake)
+            archive(arbeitnow, "arbeitnow", directory=lake)
 
     return to_dataframe(normalise_all(remotive, arbeitnow))
 

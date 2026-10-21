@@ -9,8 +9,6 @@ from datetime import datetime, timezone
 ARBEIT_NOW_URL = "https://www.arbeitnow.com/api/job-board-api"
 REMOTIVE_URL = "https://remotive.com/api/remote-jobs"
 
-LAKE_DIR = Path(__file__).parent / "lake"
-
 USER_AGENT = "job-match-agency/0.1 (learning project)"
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
@@ -104,14 +102,19 @@ def fetch_all(
     )
 
 
-def save_raw(payload: dict, name: str, directory: Path = LAKE_DIR) -> Path:
+def save_raw(payload: dict, name: str, directory: Path) -> Path:
     """Write one payload to <directory>/<name>_<utc timestamp>.json.
+
+    `directory` is required: where the lake lives is jobagency.storage's
+    decision, not this module's. fetch.py only knows how to talk HTTP.
 
     One JSON document per file. Appending several to one file would produce
     something no parser can read back.
     """
     directory.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Microseconds, not seconds: two different payloads written in the
+    # same second would otherwise share a name and silently overwrite.
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     path = directory / f"{name}_{stamp}.json"
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path

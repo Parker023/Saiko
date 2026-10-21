@@ -271,13 +271,14 @@ def test_save_raw_writes_one_valid_json_document(tmp_path):
     json.loads(path.read_text())             # raises if it is not valid JSON
 
 
-def test_two_saves_do_not_overwrite_or_concatenate(tmp_path):
+def test_two_saves_never_overwrite_each_other(tmp_path):
+    """Second-precision names collided when two payloads were written in the
+    same second - the first was silently lost. Microseconds fixed it."""
     a = save_raw({"n": 1}, "x", tmp_path)
     b = save_raw({"n": 2}, "x", tmp_path)
-    if a == b:                               # same second - acceptable
-        assert load_raw(a) == {"n": 2}
-    else:
-        assert load_raw(a) == {"n": 1} and load_raw(b) == {"n": 2}
+    assert a != b
+    assert load_raw(a) == {"n": 1}
+    assert load_raw(b) == {"n": 2}
 
 
 # =========================================================================

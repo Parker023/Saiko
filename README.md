@@ -16,6 +16,16 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Optionally, to archive payloads to miniS3 (see
+[Storage](#storage-local-lake--minis3)) — `requirements-minis3.txt` explains why
+this is not a normal requirement:
+
+```bash
+pip install -r requirements-minis3.txt
+export MINIS3_ENDPOINT="https://ani-srv.tail1678db.ts.net/storage/minis3"
+export MINIS3_API_KEY="ms3_..."          # never commit this
+```
+
 **Run the pipeline as a script** — fetch, analyse, write charts, print a summary:
 
 ```bash
@@ -133,6 +143,57 @@ pagination is stable. `total` is the count after filtering, before slicing.
 
 ---
 
+## Storage: local lake + miniS3
+
+Fetched payloads live in two tiers.
+
+| | Where | Holds |
+|---|---|---|
+| **Local** | `~/data/jobagency/lake` (override with `JOBAGENCY_LAKE`) | the last 3 days |
+| **Remote** | miniS3 bucket `jobagency` on `ani-srv`, over Tailscale | everything |
+
+Object keys are date-partitioned, source first:
+
+```
+remotive/2026/10/21/remotive_20261021T135500123456Z.json
+```
+
+So `list_objects(prefix="remotive/2026/10/")` returns one month, and a single
+bucket could hold other projects without collisions.
+
+### The rule everything rests on
+
+> **A local file is never deleted unless miniS3 confirms it has a copy.**
+
+That one rule covers every failure mode without special cases:
+
+| Failure | Result |
+|---|---|
+| Tailscale off | upload fails → file stays → retried next run |
+| Server errors during prune | `object_exists` raises → file kept (unknown is not confirmed) |
+| miniS3 not installed or not configured | nothing uploads, **nothing prunes** |
+| An old file was never uploaded | prune uploads it *first*, then deletes |
+
+It matters because **these payloads are not reproducible**: a posting that
+drops off the feed is gone, and the lake is the only record it existed. Eight
+of the storage tests are failure cases for that reason.
+
+### Deduplication
+
+`archive()` skips a payload that is byte-identical to the newest one already
+stored for that source. Arbeitnow refreshes hourly, so fetching more often
+returns exact repeats — measured on real runs at **318 files holding 12
+distinct payloads, 94% waste**. What is lost is the record that a fetch
+happened and found nothing new; the logs cover that. Pass `dedupe=False` to
+keep every fetch.
+
+### miniS3 is optional, including at import
+
+`storage.py` catches the `ImportError`. Without the client the project still
+imports, fetches, analyses and serves — it simply never uploads and never
+prunes. An unconditional import would make "optional" a claim the code did not
+honour.
+
 ## The UI
 
 A Streamlit app on port 8501 that talks to the API on 8000 over HTTP. Two
@@ -205,7 +266,7 @@ the top "skills" are its business categories rather than developer skills.
 
 ## Testing
 
-143 fast tests, offline and deterministic, plus one integration test that is
+166 fast tests, offline and deterministic, plus one integration test that is
 deselected by default.
 
 | File | Covers |
@@ -214,6 +275,7 @@ deselected by default.
 | `test_analyse.py` | every statistic, the honesty contract, JSON-serialisability |
 | `test_fetch.py` | paging, retries, the disk cache — all with the network mocked |
 | `test_api.py` | every endpoint, validation, pagination, 404s and 503s |
+| `test_storage.py` | the never-delete-unconfirmed rule, dedup, optional import |
 | `test_ui_boundary.py` | the UI does not import the backend |
 
 - **Pure functions** (`normalise`, `analyse`) are tested directly against
@@ -232,7 +294,7 @@ deselected by default.
   documented parameters; it is how you find out they changed something.
 
 ```bash
-pytest -q                               # 143 tests, ~1.8s
+pytest -q                               # 166 tests, ~2.0s
 pytest -m integration -o addopts=""     # 1 test, hits remotive.com
 ```
 
