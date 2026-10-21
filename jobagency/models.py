@@ -74,3 +74,18 @@ class JobSummary(BaseModel):
 class JobDetail(JobSummary):
     description_html: str
 
+
+
+class JobListResponse(BaseModel):
+    """A page of job summaries.
+
+    `total` is the count AFTER filtering and BEFORE slicing, so a client can
+    tell whether there is another page: offset + len(items) < total.
+    `limit` and `offset` are echoed back because the caller may have relied
+    on the defaults.
+    """
+
+    total: int
+    limit: int
+    offset: int
+    items: list[JobSummary]

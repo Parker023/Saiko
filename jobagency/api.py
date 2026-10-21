@@ -12,7 +12,12 @@ import pandas as pd
 from fastapi import Depends, FastAPI, Request, Response, status, HTTPException, Query
 
 from jobagency.main import load_jobs_with_fallback, build_report
-from jobagency.models import JobStatsResponse, JobSummary, JobDetail
+from jobagency.models import (
+    JobDetail,
+    JobListResponse,
+    JobStatsResponse,
+    JobSummary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,57 +108,101 @@ def stats(df: pd.DataFrame = Depends(get_dataframe)):
     return build_report(df)
 
 
-@app.get("/jobs")
-def jobs(*,
-         source: str | None = None,
-         company: str | None = Query(default=None, max_length=100),
-         category: str | None = Query(default=None, max_length=100),
-         job_type: str | None = Query(default=None, max_length=50),
-         tag: str | None = Query(default=None, max_length=50),
-         q: str | None = Query(default=None, max_length=100, min_length=2),
-         remote: bool | None = Query(default=None),
-         has_salary: bool | None = Query(default=None),
-         limit: int = Query(default=20, ge=1, le=100), offset: int = Query(default=0, ge=0),
-         df: pd.DataFrame = Depends(get_dataframe)):
-    """Search for jobs."""
-    df_new = df.copy()
+COUNTABLE_TEXT_FILTERS = ("source", "company", "category", "job_type")
 
-    # starts filtering
-    df_new = df_new[df_new["source"] == source.lower()] if source else df_new
-    df_new = df_new[df_new["company"].str.contains(company, case=False, na=False)] if company else df_new
-    df_new = df_new[df_new["category"] == category.lower()] if category else df_new
-    df_new = df_new[df_new["job_type"] == job_type.lower()] if job_type else df_new
-    df_new = df_new[df_new["tags"].str.contains(tag, case=False, na=False)] if tag else df_new
-    df_new = df_new[df_new["title"].str.contains(q, case=False, na=False)] if q else df_new
-    df_new = df_new[df_new["remote"] == remote] if remote is not None else df_new
-    df_new = df_new[df_new["salary_low"].notna()] if has_salary is not None else df_new
-    df_new = df.dropna(subset=["salary_low"]) if has_salary is None else df_new
-    df_new = df.dropna(subset=["salary_high"]) if has_salary is None else df_new
 
-    total_jobs = len(df_new)
-    df_new = df_new.iloc[offset:offset + limit]
+def _records(frame: pd.DataFrame) -> list[dict]:
+    """Rows as dicts with NaN turned into None.
 
-    # ends filtering
+    Pydantic will NOT do this for you: NaN is a valid float, so `float | None`
+    happily passes it through - and `json.dumps` then emits a bare `NaN`,
+    which is not valid JSON. Python's own parser accepts it, so this only
+    breaks once a real client (a browser, Streamlit) tries to read it.
+    """
+    return frame.astype(object).where(frame.notna(), None).to_dict(orient="records")
 
-    items = [JobSummary.model_validate(row) for row in df_new.to_dict(orient="records")]
+
+@app.get("/jobs", response_model=JobListResponse)
+def jobs(
+        *,
+        source: str | None = None,
+        company: str | None = Query(default=None, max_length=100),
+        category: str | None = Query(default=None, max_length=100),
+        job_type: str | None = Query(default=None, max_length=50),
+        tag: str | None = Query(default=None, max_length=50),
+        q: str | None = Query(default=None, max_length=100, min_length=2),
+        remote: bool | None = Query(default=None),
+        has_salary: bool | None = Query(default=None),
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        df: pd.DataFrame = Depends(get_dataframe),
+):
+    """Search job postings. All filters are combined with AND."""
+    frame = df
+
+    # Case-insensitive exact match: lower BOTH sides. Lowering only the input
+    # silently matches nothing because the stored values keep their case.
+    for column, value in (
+            ("source", source),
+            ("category", category),
+            ("job_type", job_type),
+    ):
+        if value is not None:
+            frame = frame[frame[column].str.lower() == value.lower()]
+
+    # Substring rather than equality: a caller searching "google" should find
+    # "Google Cloud". Na= False, so missing values become False, not NaN.
+    if company is not None:
+        frame = frame[frame["company"].str.contains(company, case=False, na=False)]
+
+    if q is not None:
+        frame = frame[frame["title"].str.contains(q, case=False, na=False)]
+
+    # `tags` holds lists, so .str.contains does not apply - it treats every
+    # non-string as missing and silently matches nothing. Test membership
+    # per row instead.
+    if tag is not None:
+        wanted = tag.lower()
+        frame = frame[frame["tags"].apply(
+            lambda tags: any(wanted in str(t).lower() for t in (tags or []))
+        )]
+
+    # Three-state booleans: comparing the mask TO the flag handles True and
+    # False in one expression, and None means "do not filter".
+    if remote is not None:
+        frame = frame[frame["remote"].fillna(False) == remote]
+
+    if has_salary is not None:
+        # Both bounds, to match salary_stats' definition of "has a salary".
+        present = frame["salary_low"].notna() & frame["salary_high"].notna()
+        frame = frame[present == has_salary]
+
+    total = len(frame)
+
+    # Without an explicit sort, pagination is undefined - page 2 could repeat
+    # rows from page 1. Newest first is also what a reader wants.
+    frame = frame.sort_values("posted_at", ascending=False, kind="stable")
+    page = frame.iloc[offset:offset + limit]
 
     return {
-        "total": total_jobs,
+        "total": total,
         "limit": limit,
         "offset": offset,
-        "items": items
+        "items": [JobSummary.model_validate(row) for row in _records(page)],
     }
 
 
-@app.get("/jobs/{job_id}")
-def job(job_id: str, resp: Response, df: pd.DataFrame = Depends(get_dataframe)):
-    """Get a single job by its ID."""
-    matching_rows = df.loc[df["job_id"] == job_id]
+@app.get("/jobs/{job_id}", response_model=JobDetail)
+def job(job_id: str, df: pd.DataFrame = Depends(get_dataframe)):
+    """One job, including its description.
 
-    if not matching_rows.empty:
-        row = matching_rows.iloc[0]
-        resp.status_code = status.HTTP_200_OK
-        return JobDetail.model_validate(row.to_dict())
-    else:
-        resp.status_code = status.HTTP_404_NOT_FOUND
-        return {"error": f"no job with ID {job_id}"}
+    HTTPException rather than setting response.status_code: it short-circuits,
+    so there is no success path to fall through into, and it produces the same
+    {"detail": ...} shape as every other error in this API.
+    """
+    matches = df.loc[df["job_id"] == job_id]
+    if matches.empty:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail=f"no job with id {job_id!r}"
+        )
+    return JobDetail.model_validate(_records(matches.head(1))[0])
